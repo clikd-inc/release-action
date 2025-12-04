@@ -1,5 +1,5 @@
 name: 'Clikd Release Action'
-description: 'Automated semantic releases with AI-powered changelogs. Analyzes conventional commits, bumps versions, generates changelogs, and creates GitHub releases.'
+description: 'Semantic releases with AI changelogs. Auto-bump versions from conventional commits.'
 author: 'Clikd Inc.'
 
 branding:
