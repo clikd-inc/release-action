@@ -59,13 +59,16 @@ This creates a `.clikd/release.toml` configuration file.
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `version` | Version of clikd to install | No | `latest` |
+| `bump` | Version bump type: `major`, `minor`, `patch`, `auto` | No | `auto` |
+| `projects` | Per-project bumps (e.g., `gate:major,rig:minor`) | No | - |
 | `push` | Push commits and tags to remote | No | `true` |
 | `github-release` | Create GitHub releases | No | `true` |
 | `anthropic-api-key` | API key for AI changelogs | No | - |
 | `github-token` | GitHub token for releases | No | `github.token` |
 | `working-directory` | Working directory | No | `.` |
 | `dry-run` | Run without pushing | No | `false` |
-| `extra-args` | Additional clikd arguments | No | - |
+| `git-user-name` | Git user name for commits | No | `github-actions[bot]` |
+| `git-user-email` | Git user email for commits | No | `github-actions[bot]@users.noreply.github.com` |
 
 ## Outputs
 
@@ -90,12 +93,30 @@ This creates a `.clikd/release.toml` configuration file.
 
 ## Examples
 
-### Basic Usage
+### Basic Usage (Auto-detect bump from commits)
 
 ```yaml
 - uses: clikd-inc/release-action@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Force Major Release
+
+```yaml
+- uses: clikd-inc/release-action@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    bump: major
+```
+
+### Per-Project Bumps (Monorepo)
+
+```yaml
+- uses: clikd-inc/release-action@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    projects: 'api:major,web:minor,shared:patch'
 ```
 
 ### With AI-Powered Changelogs
@@ -114,6 +135,16 @@ This creates a `.clikd/release.toml` configuration file.
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     dry-run: true
+```
+
+### Custom Git Identity
+
+```yaml
+- uses: clikd-inc/release-action@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    git-user-name: 'Release Bot'
+    git-user-email: 'release-bot@example.com'
 ```
 
 ### Monorepo with Conditional Jobs
@@ -167,13 +198,22 @@ jobs:
     working-directory: packages/core
 ```
 
-### Skip GitHub Releases
+### Skip GitHub Releases (Tags Only)
 
 ```yaml
 - uses: clikd-inc/release-action@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     github-release: false
+```
+
+### Specific clikd Version
+
+```yaml
+- uses: clikd-inc/release-action@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    version: '0.5.0'
 ```
 
 ## How It Works

@@ -12,6 +12,16 @@ inputs:
     required: false
     default: 'latest'
 
+  bump:
+    description: 'Version bump type: major, minor, patch, auto (default: auto - determined by conventional commits)'
+    required: false
+    default: 'auto'
+
+  projects:
+    description: 'Per-project version bumps as comma-separated list (e.g., "gate:major,rig:minor,core:patch")'
+    required: false
+    default: ''
+
   push:
     description: 'Push commits and tags to remote'
     required: false
@@ -42,10 +52,15 @@ inputs:
     required: false
     default: 'false'
 
-  extra-args:
-    description: 'Additional arguments to pass to clikd release prepare'
+  git-user-name:
+    description: 'Git user name for commits'
     required: false
-    default: ''
+    default: 'github-actions[bot]'
+
+  git-user-email:
+    description: 'Git user email for commits'
+    required: false
+    default: 'github-actions[bot]@users.noreply.github.com'
 
 outputs:
   released:
@@ -65,9 +80,12 @@ runs:
   steps:
     - name: Setup Git identity
       shell: bash
+      env:
+        GIT_USER_NAME: ${{ inputs.git-user-name }}
+        GIT_USER_EMAIL: ${{ inputs.git-user-email }}
       run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "$GIT_USER_NAME"
+        git config --global user.email "$GIT_USER_EMAIL"
 
     - name: Install clikd
       shell: bash
@@ -124,10 +142,11 @@ runs:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         WORKING_DIR: ${{ inputs.working-directory }}
+        BUMP_TYPE: ${{ inputs.bump }}
+        PROJECTS: ${{ inputs.projects }}
         DO_PUSH: ${{ inputs.push }}
         DO_GITHUB_RELEASE: ${{ inputs.github-release }}
         DRY_RUN: ${{ inputs.dry-run }}
-        EXTRA_ARGS: ${{ inputs.extra-args }}
       run: |
         set -euo pipefail
 
@@ -137,6 +156,10 @@ runs:
 
         ARGS="--ci"
 
+        if [ -n "$PROJECTS" ]; then
+          ARGS="$ARGS --project $PROJECTS"
+        fi
+
         if [ "$DRY_RUN" = "true" ]; then
           echo "Running in dry-run mode (no push)"
         elif [ "$DO_PUSH" = "true" ]; then
@@ -145,10 +168,6 @@ runs:
           if [ "$DO_GITHUB_RELEASE" = "true" ]; then
             ARGS="$ARGS --github-release"
           fi
-        fi
-
-        if [ -n "$EXTRA_ARGS" ]; then
-          ARGS="$ARGS $EXTRA_ARGS"
         fi
 
         echo "Executing: clikd release prepare $ARGS"
