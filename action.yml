@@ -1,0 +1,193 @@
+name: 'Clikd Release Action'
+description: 'Automated semantic releases with AI-powered changelogs. Analyzes conventional commits, bumps versions, generates changelogs, and creates GitHub releases.'
+author: 'Clikd Inc.'
+
+branding:
+  icon: 'package'
+  color: 'purple'
+
+inputs:
+  version:
+    description: 'Version of clikd to install (e.g., "0.5.0" or "latest")'
+    required: false
+    default: 'latest'
+
+  push:
+    description: 'Push commits and tags to remote'
+    required: false
+    default: 'true'
+
+  github-release:
+    description: 'Create GitHub releases for each released package'
+    required: false
+    default: 'true'
+
+  anthropic-api-key:
+    description: 'Anthropic API key for AI-powered changelog generation (optional)'
+    required: false
+    default: ''
+
+  github-token:
+    description: 'GitHub token for creating releases and pushing'
+    required: false
+    default: ${{ github.token }}
+
+  working-directory:
+    description: 'Working directory for the release process'
+    required: false
+    default: '.'
+
+  dry-run:
+    description: 'Run release process without pushing (for testing)'
+    required: false
+    default: 'false'
+
+  extra-args:
+    description: 'Additional arguments to pass to clikd release prepare'
+    required: false
+    default: ''
+
+outputs:
+  released:
+    description: 'Whether any releases were created ("true" or "false")'
+    value: ${{ steps.release.outputs.released }}
+
+  releases:
+    description: 'JSON array of released packages with name, old_version, new_version, and tag'
+    value: ${{ steps.release.outputs.releases }}
+
+  release-count:
+    description: 'Number of packages released'
+    value: ${{ steps.release.outputs.release_count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Git identity
+      shell: bash
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Install clikd
+      shell: bash
+      env:
+        CLIKD_VERSION: ${{ inputs.version }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+
+        echo "::group::Installing clikd"
+
+        if [ "$CLIKD_VERSION" = "latest" ]; then
+          echo "Fetching latest version..."
+          CLIKD_VERSION=$(curl -sL \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/clikd-inc/cli/releases/latest" | \
+            grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/^v//')
+        fi
+
+        echo "Installing clikd v${CLIKD_VERSION}"
+
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+
+        case "$ARCH" in
+          x86_64) ARCH="x86_64" ;;
+          aarch64|arm64) ARCH="aarch64" ;;
+          *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+        esac
+
+        case "$OS" in
+          linux) TARGET="${ARCH}-unknown-linux-gnu" ;;
+          darwin) TARGET="${ARCH}-apple-darwin" ;;
+          *) echo "Unsupported OS: $OS"; exit 1 ;;
+        esac
+
+        DOWNLOAD_URL="https://github.com/clikd-inc/cli/releases/download/v${CLIKD_VERSION}/clikd-${TARGET}.tar.xz"
+
+        echo "Downloading from: $DOWNLOAD_URL"
+
+        curl -sL "$DOWNLOAD_URL" | tar -xJ
+
+        sudo mv clikd /usr/local/bin/
+        chmod +x /usr/local/bin/clikd
+
+        echo "Installed clikd $(clikd --version)"
+        echo "::endgroup::"
+
+    - name: Run clikd release
+      id: release
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        WORKING_DIR: ${{ inputs.working-directory }}
+        DO_PUSH: ${{ inputs.push }}
+        DO_GITHUB_RELEASE: ${{ inputs.github-release }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -euo pipefail
+
+        cd "$WORKING_DIR"
+
+        echo "::group::Running clikd release prepare"
+
+        ARGS="--ci"
+
+        if [ "$DRY_RUN" = "true" ]; then
+          echo "Running in dry-run mode (no push)"
+        elif [ "$DO_PUSH" = "true" ]; then
+          ARGS="$ARGS --push"
+
+          if [ "$DO_GITHUB_RELEASE" = "true" ]; then
+            ARGS="$ARGS --github-release"
+          fi
+        fi
+
+        if [ -n "$EXTRA_ARGS" ]; then
+          ARGS="$ARGS $EXTRA_ARGS"
+        fi
+
+        echo "Executing: clikd release prepare $ARGS"
+
+        OUTPUT=$(clikd release prepare $ARGS 2>&1) || {
+          EXIT_CODE=$?
+          echo "$OUTPUT"
+          if echo "$OUTPUT" | grep -q "no projects needed version bumps"; then
+            echo "No releases needed"
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "releases=[]" >> "$GITHUB_OUTPUT"
+            echo "release_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit $EXIT_CODE
+        }
+
+        echo "$OUTPUT"
+
+        echo "::endgroup::"
+
+        if echo "$OUTPUT" | grep -q "successfully released"; then
+          echo "released=true" >> "$GITHUB_OUTPUT"
+
+          RELEASE_COUNT=$(echo "$OUTPUT" | grep -oP "successfully released \K\d+" || echo "0")
+          echo "release_count=$RELEASE_COUNT" >> "$GITHUB_OUTPUT"
+
+          RELEASES=$(echo "$OUTPUT" | grep -E "^\s+\S+\s+\S+\s+->\s+\S+" | while read -r line; do
+            NAME=$(echo "$line" | awk '{print $1}')
+            OLD_VERSION=$(echo "$line" | awk '{print $2}')
+            NEW_VERSION=$(echo "$line" | awk '{print $4}')
+            echo "{\"name\":\"$NAME\",\"old_version\":\"$OLD_VERSION\",\"new_version\":\"$NEW_VERSION\",\"tag\":\"${NAME}-v${NEW_VERSION}\"}"
+          done | jq -s '.' || echo "[]")
+
+          echo "releases=$RELEASES" >> "$GITHUB_OUTPUT"
+
+          echo "::notice::Released $RELEASE_COUNT package(s)"
+        else
+          echo "released=false" >> "$GITHUB_OUTPUT"
+          echo "releases=[]" >> "$GITHUB_OUTPUT"
+          echo "release_count=0" >> "$GITHUB_OUTPUT"
+        fi
