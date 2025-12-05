@@ -1,5 +1,5 @@
 name: 'Clikd Release Action'
-description: 'Semantic releases with AI changelogs. Auto-bump versions from conventional commits.'
+description: 'Semantic releases with AI changelogs. Creates a release PR with auto-bumped versions from conventional commits.'
 author: 'Clikd Inc.'
 
 branding:
@@ -22,23 +22,13 @@ inputs:
     required: false
     default: ''
 
-  push:
-    description: 'Push commits and tags to remote'
-    required: false
-    default: 'true'
-
-  github-release:
-    description: 'Create GitHub releases for each released package'
-    required: false
-    default: 'true'
-
   anthropic-api-key:
     description: 'Anthropic API key for AI-powered changelog generation (optional)'
     required: false
     default: ''
 
   github-token:
-    description: 'GitHub token for creating releases and pushing'
+    description: 'GitHub token for creating PRs and pushing branches'
     required: false
     default: ${{ github.token }}
 
@@ -48,7 +38,7 @@ inputs:
     default: '.'
 
   dry-run:
-    description: 'Run release process without pushing (for testing)'
+    description: 'Run release process without pushing or creating PR (for testing)'
     required: false
     default: 'false'
 
@@ -63,16 +53,24 @@ inputs:
     default: 'github-actions[bot]@users.noreply.github.com'
 
 outputs:
-  released:
-    description: 'Whether any releases were created ("true" or "false")'
-    value: ${{ steps.release.outputs.released }}
+  pr-created:
+    description: 'Whether a release PR was created ("true" or "false")'
+    value: ${{ steps.release.outputs.pr_created }}
+
+  pr-url:
+    description: 'URL of the created pull request'
+    value: ${{ steps.release.outputs.pr_url }}
+
+  pr-number:
+    description: 'Number of the created pull request'
+    value: ${{ steps.release.outputs.pr_number }}
 
   releases:
-    description: 'JSON array of released packages with name, old_version, new_version, and tag'
+    description: 'JSON array of packages to be released with name, old_version, new_version'
     value: ${{ steps.release.outputs.releases }}
 
   release-count:
-    description: 'Number of packages released'
+    description: 'Number of packages in the release'
     value: ${{ steps.release.outputs.release_count }}
 
 runs:
@@ -135,7 +133,7 @@ runs:
         echo "Installed clikd $(clikd --version)"
         echo "::endgroup::"
 
-    - name: Run clikd release
+    - name: Run clikd release prepare
       id: release
       shell: bash
       env:
@@ -144,8 +142,6 @@ runs:
         WORKING_DIR: ${{ inputs.working-directory }}
         BUMP_TYPE: ${{ inputs.bump }}
         PROJECTS: ${{ inputs.projects }}
-        DO_PUSH: ${{ inputs.push }}
-        DO_GITHUB_RELEASE: ${{ inputs.github-release }}
         DRY_RUN: ${{ inputs.dry-run }}
       run: |
         set -euo pipefail
@@ -154,30 +150,42 @@ runs:
 
         echo "::group::Running clikd release prepare"
 
+        # Bump type as positional argument (auto is default, so skip it)
+        BUMP_ARG=""
+        if [ -n "$BUMP_TYPE" ] && [ "$BUMP_TYPE" != "auto" ]; then
+          BUMP_ARG="$BUMP_TYPE"
+        fi
+
         ARGS="--ci"
 
         if [ -n "$PROJECTS" ]; then
-          ARGS="$ARGS --project $PROJECTS"
+          IFS=',' read -ra PROJECT_ARRAY <<< "$PROJECTS"
+          for proj in "${PROJECT_ARRAY[@]}"; do
+            ARGS="$ARGS --project $proj"
+          done
         fi
+
+        echo "Executing: clikd release prepare $BUMP_ARG $ARGS"
 
         if [ "$DRY_RUN" = "true" ]; then
-          echo "Running in dry-run mode (no push)"
-        elif [ "$DO_PUSH" = "true" ]; then
-          ARGS="$ARGS --push"
-
-          if [ "$DO_GITHUB_RELEASE" = "true" ]; then
-            ARGS="$ARGS --github-release"
-          fi
+          echo "Dry-run mode: would execute 'clikd release prepare $ARGS'"
+          echo "pr_created=false" >> "$GITHUB_OUTPUT"
+          echo "pr_url=" >> "$GITHUB_OUTPUT"
+          echo "pr_number=" >> "$GITHUB_OUTPUT"
+          echo "releases=[]" >> "$GITHUB_OUTPUT"
+          echo "release_count=0" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
         fi
 
-        echo "Executing: clikd release prepare $ARGS"
-
-        OUTPUT=$(clikd release prepare $ARGS 2>&1) || {
+        OUTPUT=$(clikd release prepare $BUMP_ARG $ARGS 2>&1) || {
           EXIT_CODE=$?
           echo "$OUTPUT"
           if echo "$OUTPUT" | grep -q "no projects needed version bumps"; then
             echo "No releases needed"
-            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "pr_created=false" >> "$GITHUB_OUTPUT"
+            echo "pr_url=" >> "$GITHUB_OUTPUT"
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
             echo "releases=[]" >> "$GITHUB_OUTPUT"
             echo "release_count=0" >> "$GITHUB_OUTPUT"
             exit 0
@@ -189,24 +197,33 @@ runs:
 
         echo "::endgroup::"
 
-        if echo "$OUTPUT" | grep -q "successfully released"; then
-          echo "released=true" >> "$GITHUB_OUTPUT"
+        PR_URL=$(echo "$OUTPUT" | grep -oP 'pull request created: \K.*' || echo "")
 
-          RELEASE_COUNT=$(echo "$OUTPUT" | grep -oP "successfully released \K\d+" || echo "0")
+        if [ -n "$PR_URL" ]; then
+          echo "pr_created=true" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+          PR_NUMBER=$(echo "$PR_URL" | grep -oP '/pull/\K\d+' || echo "")
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+          RELEASE_COUNT=$(echo "$OUTPUT" | grep -oP 'prepared \K\d+' || echo "0")
           echo "release_count=$RELEASE_COUNT" >> "$GITHUB_OUTPUT"
 
-          RELEASES=$(echo "$OUTPUT" | grep -E "^\s+\S+\s+\S+\s+->\s+\S+" | while read -r line; do
-            NAME=$(echo "$line" | awk '{print $1}')
-            OLD_VERSION=$(echo "$line" | awk '{print $2}')
-            NEW_VERSION=$(echo "$line" | awk '{print $4}')
-            echo "{\"name\":\"$NAME\",\"old_version\":\"$OLD_VERSION\",\"new_version\":\"$NEW_VERSION\",\"tag\":\"${NAME}-v${NEW_VERSION}\"}"
-          done | jq -s '.' || echo "[]")
+          RELEASES=$(echo "$OUTPUT" | grep -E '^\s+\S+:.*->.*\(' | while read -r line; do
+            NAME=$(echo "$line" | awk -F: '{print $1}' | xargs)
+            VERSIONS=$(echo "$line" | grep -oP '\d+\.\d+\.\d+' | head -2)
+            OLD_VERSION=$(echo "$VERSIONS" | head -1)
+            NEW_VERSION=$(echo "$VERSIONS" | tail -1)
+            echo "{\"name\":\"$NAME\",\"old_version\":\"$OLD_VERSION\",\"new_version\":\"$NEW_VERSION\"}"
+          done | jq -s '.' 2>/dev/null || echo "[]")
 
           echo "releases=$RELEASES" >> "$GITHUB_OUTPUT"
 
-          echo "::notice::Released $RELEASE_COUNT package(s)"
+          echo "::notice::Created release PR: $PR_URL"
         else
-          echo "released=false" >> "$GITHUB_OUTPUT"
+          echo "pr_created=false" >> "$GITHUB_OUTPUT"
+          echo "pr_url=" >> "$GITHUB_OUTPUT"
+          echo "pr_number=" >> "$GITHUB_OUTPUT"
           echo "releases=[]" >> "$GITHUB_OUTPUT"
           echo "release_count=0" >> "$GITHUB_OUTPUT"
         fi

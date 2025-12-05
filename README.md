@@ -11,8 +11,28 @@ Automated semantic releases with AI-powered changelogs for monorepos and multi-l
 - **Multi-Language Support** - Rust, Node.js, Python, Go, Elixir, C#
 - **Monorepo Support** - Handles multiple packages with dependency graph resolution
 - **AI-Powered Changelogs** - Optional AI enhancement using Claude API
-- **Automatic GitHub Releases** - Creates releases with generated changelogs
+- **PR-Based Workflow** - Creates release PRs for review before publishing
 - **Zero Configuration** - Works out of the box with sensible defaults
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  1. Action runs clikd release prepare --ci                     │
+│     ├── Analyzes conventional commits                          │
+│     ├── Bumps versions (major/minor/patch)                     │
+│     ├── Generates changelogs (with optional AI)                │
+│     ├── Creates release manifest in clikd/releases/            │
+│     └── Creates Pull Request                                   │
+├─────────────────────────────────────────────────────────────────┤
+│  2. You review and merge the PR                                │
+├─────────────────────────────────────────────────────────────────┤
+│  3. GitHub App (clikd-bot) handles post-merge:                 │
+│     ├── Creates Git tags                                       │
+│     ├── Creates GitHub Releases                                │
+│     └── Cleans up manifest files                               │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ## Quick Start
 
@@ -26,6 +46,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
@@ -52,7 +73,7 @@ curl -fsSL https://clikd.dev/install.sh | sh
 clikd release init
 ```
 
-This creates a `.clikd/release.toml` configuration file.
+This creates a `clikd/` directory with configuration files.
 
 ## Inputs
 
@@ -61,12 +82,10 @@ This creates a `.clikd/release.toml` configuration file.
 | `version` | Version of clikd to install | No | `latest` |
 | `bump` | Version bump type: `major`, `minor`, `patch`, `auto` | No | `auto` |
 | `projects` | Per-project bumps (e.g., `gate:major,rig:minor`) | No | - |
-| `push` | Push commits and tags to remote | No | `true` |
-| `github-release` | Create GitHub releases | No | `true` |
 | `anthropic-api-key` | API key for AI changelogs | No | - |
-| `github-token` | GitHub token for releases | No | `github.token` |
+| `github-token` | GitHub token for PR creation | No | `github.token` |
 | `working-directory` | Working directory | No | `.` |
-| `dry-run` | Run without pushing | No | `false` |
+| `dry-run` | Run without creating PR | No | `false` |
 | `git-user-name` | Git user name for commits | No | `github-actions[bot]` |
 | `git-user-email` | Git user email for commits | No | `github-actions[bot]@users.noreply.github.com` |
 
@@ -74,9 +93,11 @@ This creates a `.clikd/release.toml` configuration file.
 
 | Output | Description |
 |--------|-------------|
-| `released` | `true` if releases were created |
-| `releases` | JSON array of released packages |
-| `release-count` | Number of packages released |
+| `pr-created` | `true` if a release PR was created |
+| `pr-url` | URL of the created pull request |
+| `pr-number` | Number of the created pull request |
+| `releases` | JSON array of packages to be released |
+| `release-count` | Number of packages in the release |
 
 ### Releases Output Format
 
@@ -85,8 +106,7 @@ This creates a `.clikd/release.toml` configuration file.
   {
     "name": "my-package",
     "old_version": "1.0.0",
-    "new_version": "1.1.0",
-    "tag": "my-package-v1.1.0"
+    "new_version": "1.1.0"
   }
 ]
 ```
@@ -137,6 +157,36 @@ This creates a `.clikd/release.toml` configuration file.
     dry-run: true
 ```
 
+### Using Outputs
+
+```yaml
+- id: release
+  uses: clikd-inc/release-action@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Show PR
+  if: steps.release.outputs.pr-created == 'true'
+  run: |
+    echo "Release PR: ${{ steps.release.outputs.pr-url }}"
+    echo "Packages: ${{ steps.release.outputs.release-count }}"
+```
+
+### Auto-Merge Release PRs
+
+```yaml
+- id: release
+  uses: clikd-inc/release-action@v1
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Enable auto-merge
+  if: steps.release.outputs.pr-created == 'true'
+  run: gh pr merge --auto --squash "${{ steps.release.outputs.pr-number }}"
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
 ### Custom Git Identity
 
 ```yaml
@@ -147,86 +197,14 @@ This creates a `.clikd/release.toml` configuration file.
     git-user-email: 'release-bot@example.com'
 ```
 
-### Monorepo with Conditional Jobs
-
-```yaml
-name: Release
-
-on:
-  push:
-    branches: [main]
-
-permissions:
-  contents: write
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    outputs:
-      released: ${{ steps.release.outputs.released }}
-      releases: ${{ steps.release.outputs.releases }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - id: release
-        uses: clikd-inc/release-action@v1
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-
-  publish:
-    needs: release
-    if: needs.release.outputs.released == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Publish released packages
-        run: |
-          echo "Released packages:"
-          echo '${{ needs.release.outputs.releases }}' | jq -r '.[].name'
-```
-
-### Custom Working Directory
-
-```yaml
-- uses: clikd-inc/release-action@v1
-  with:
-    github-token: ${{ secrets.GITHUB_TOKEN }}
-    working-directory: packages/core
-```
-
-### Skip GitHub Releases (Tags Only)
-
-```yaml
-- uses: clikd-inc/release-action@v1
-  with:
-    github-token: ${{ secrets.GITHUB_TOKEN }}
-    github-release: false
-```
-
 ### Specific clikd Version
 
 ```yaml
 - uses: clikd-inc/release-action@v1
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
-    version: '0.5.0'
+    version: '0.6.0'
 ```
-
-## How It Works
-
-1. **Checkout** - The action requires a full git history (`fetch-depth: 0`)
-2. **Install** - Downloads and installs the clikd CLI
-3. **Analyze** - Parses conventional commits since last release
-4. **Bump** - Determines appropriate version bumps per package
-5. **Changelog** - Generates changelog entries (optionally enhanced with AI)
-6. **Commit** - Creates a release commit with version bumps
-7. **Tag** - Creates git tags for each released package
-8. **Push** - Pushes commits and tags to remote
-9. **Release** - Creates GitHub releases with changelogs
 
 ## Conventional Commits
 
@@ -254,16 +232,16 @@ Version bumps are determined by commit prefixes:
 
 ## Troubleshooting
 
-### No releases created
+### No PR created
 
 - Ensure commits follow [Conventional Commits](https://www.conventionalcommits.org/) format
-- Check that `.clikd/release.toml` exists (run `clikd release init`)
+- Check that `clikd/` directory exists (run `clikd release init`)
 - Verify `fetch-depth: 0` in checkout action
 
 ### Permission denied
 
-- Add `permissions: contents: write` to your workflow
-- For fine-grained PATs, ensure "Contents: Read and write" permission
+- Add `permissions: contents: write` and `pull-requests: write` to your workflow
+- For fine-grained PATs, ensure "Contents: Read and write" and "Pull requests: Read and write" permissions
 
 ### AI changelog not working
 
